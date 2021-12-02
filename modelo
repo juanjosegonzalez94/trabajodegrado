@@ -1,0 +1,677 @@
+import pandas as pd
+import numpy as np
+import sqlite3
+import pyodbc
+import statistics
+import seaborn as sns
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn import datasets
+import gower
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import make_blobs
+from yellowbrick.cluster import KElbowVisualizer
+from sklearn.metrics import silhouette_samples, silhouette_score
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
+import plotly.express as px
+from matplotlib import pyplot as plt
+
+#%%Carga de datos
+
+#Lectura de datos
+personas = pd.read_excel('Personas_Avista.xlsx')
+centrales = pd.read_excel('CentralesResumidas_Avista.xlsx')
+i_financiera = pd.read_excel('Inf_financiera_Avista.xlsx')
+estado_creditos = pd.read_excel('Creditosporestado.xlsx')
+solicitudes = pd.read_excel('pedido.xlsx')
+creditos = pd.read_excel('cotcre.xlsx')
+reestructurados = pd.read_excel('reestructurados.xlsx')
+v_credifinanciera = pd.read_excel('B_Credifinanciera2019.xlsx')
+
+#%% Lectura y limpieza personas
+
+#Eliminar los tipos de identificación diferentes 1 que no corresponden a cédulas
+personas = personas[personas['TIPO_DOC']==1]
+
+#Identificar si hay registros duplicados en la tabla de personas
+p_duplicados = pd.DataFrame(personas.groupby(['CEDULA']).size())
+p_duplicados.reset_index(level=0, inplace=True)
+p_duplicados = p_duplicados.sort_values(by =[0],ascending=False)
+p_duplicados = p_duplicados.iloc[:,0][p_duplicados[0] > 1]
+p_duplicados = p_duplicados.reset_index(drop=True)
+
+p_duplicados = pd.DataFrame(p_duplicados)
+
+personas['CEDULA'] = pd.to_numeric(personas['CEDULA'], errors='coerce')
+personas = personas.drop_duplicates(subset = 'CEDULA')
+
+p_duplicados = pd.DataFrame(personas.groupby(['CEDULA']).size())
+p_duplicados.reset_index(level=0, inplace=True)
+p_duplicados = p_duplicados.sort_values(by =[0],ascending=False)
+
+#Eliminar cédulas menores a 6 digitos - Validado
+personas['LARGO'] = personas['CEDULA'].astype(str).str.len()
+personas = personas[personas['LARGO'] >= 6]
+personas = personas.drop('LARGO', 1)
+
+#Eliminar personas sin fecha de nacimiento
+personas = personas.dropna(subset=['FECHANAC'])
+#%% Lectura y limpieza centrales
+centrales['FECHA_CONSULTA'] = pd.to_datetime(centrales['FECHA_CONSULTA'], format='%d/%m/%Y')
+centrales_final = centrales[centrales.groupby(['CEDULA'])['FECHA_CONSULTA'].transform(max) == centrales['FECHA_CONSULTA']]
+centrales_final = centrales_final.drop_duplicates(subset='CEDULA')
+centrales_final['CEDULA'] = pd.to_numeric(centrales_final['CEDULA'], errors='coerce')
+
+#Histogramas antes de outliers
+centrales_final['SALDO_VIGENTE'].hist()
+plt.title('SALDO_VIGENTE')
+centrales_final['SALDO_MORA'].hist()
+plt.title('SALDO_MORA')
+centrales_final['CUOTAS'].hist()
+plt.title('CUOTAS')
+centrales_final['OBL_ACTIVAS'].hist()
+plt.title('OBL_ACTIVAS')
+centrales_final['OBL_CASTIGADAS'].hist()
+plt.title('OBL_CASTIGADAS')
+centrales_final['SALDO_LBZ'].hist()
+plt.title('SALDO_LBZ')
+centrales_final['SALDOMORA_LBZ'].hist()
+plt.title('SALDOMORA_LBZ')
+centrales_final['SALDO_COP'].hist()
+plt.title('SALDO_COP')
+centrales_final['SALDOMOR_COP'].hist()
+plt.title('SALDOMOR_COP')
+
+centrales_final['SALDO_VIGENTE'] = centrales_final['SALDO_VIGENTE'].clip(upper=centrales_final['SALDO_VIGENTE'].quantile(0.95))
+centrales_final['SALDO_MORA'] = centrales_final['SALDO_MORA'].clip(upper=centrales_final['SALDO_MORA'].quantile(0.95))
+centrales_final['CUOTAS'] = centrales_final['CUOTAS'] .clip(upper=centrales_final['CUOTAS'].quantile(0.95))
+centrales_final['OBL_ACTIVAS'] = centrales_final['OBL_ACTIVAS'].clip(upper=centrales_final['OBL_ACTIVAS'].quantile(0.95))
+centrales_final['OBL_CASTIGADAS'] = centrales_final['OBL_CASTIGADAS'].clip(upper=centrales_final['OBL_CASTIGADAS'].quantile(0.95))
+centrales_final['SALDO_LBZ'] = centrales_final['SALDO_LBZ'].clip(upper=centrales_final['SALDO_LBZ'].quantile(0.95))
+centrales_final['SALDOMORA_LBZ'] = centrales_final['SALDOMORA_LBZ'].clip(lower=centrales_final['SALDOMORA_LBZ'].quantile(0.05), upper=centrales_final['SALDOMORA_LBZ'].quantile(0.95))
+centrales_final['SALDO_COP'] = centrales_final['SALDO_COP'].clip(upper=centrales_final['SALDO_COP'].quantile(0.95))
+centrales_final['SALDOMOR_COP'] = centrales_final['SALDOMOR_COP'].clip(upper=centrales_final['SALDOMOR_COP'].quantile(0.95))
+
+centrales_final.boxplot(column=['SALDO_VIGENTE'])
+centrales_final.boxplot(column=['SALDO_MORA'])
+centrales_final.boxplot(column=['CUOTAS'])
+centrales_final.boxplot(column=['OBL_ACTIVAS'])
+centrales_final.boxplot(column=['OBL_CASTIGADAS'])
+centrales_final.boxplot(column=['SALDO_LBZ'])
+centrales_final.boxplot(column=['SALDOMORA_LBZ'])
+centrales_final.boxplot(column=['SALDO_COP'])
+centrales_final.boxplot(column=['SALDOMOR_COP'])
+
+#Histogramas despues de outliers
+centrales_final.hist(bins=10)
+
+centrales_final['DIF_SALDOVIGAVG'] = centrales_final['SALDO_VIGENTE'] - centrales_final['SALDO_VIGENTE'].mean()
+centrales_final['DIF_SALDOVIGMEDIANA'] = centrales_final['SALDO_VIGENTE'] - statistics.median(centrales_final['SALDO_VIGENTE'])
+centrales_final['DIF_SALDOMORAVG'] = centrales_final['SALDO_MORA'] - centrales_final['SALDO_MORA'].mean()
+centrales_final['DIF_SALDOMORMEDIANA'] = centrales_final['SALDO_MORA'] - statistics.median(centrales_final['SALDO_MORA'])
+centrales_final['DIF_OBACTAVG'] = centrales_final['OBL_ACTIVAS'] - centrales_final['OBL_ACTIVAS'].mean()
+centrales_final['DIF_OBACTMEDIANA'] = centrales_final['OBL_ACTIVAS'] - statistics.median(centrales_final['OBL_ACTIVAS'])
+
+#Unir centrales con personas
+personas = personas.merge(centrales_final, how='left', left_on='CEDULA', right_on='CEDULA')
+
+#%% Limpieza y lectura de solicitudes e información financiera
+i_financiera['CEDULA'] = pd.to_numeric(personas['CEDULA'], errors='coerce')
+
+solicitudes['CLTNUMCED'] = pd.to_numeric(solicitudes['CLTNUMCED'], errors='coerce')
+solicitudes['NUMERO'] = pd.to_numeric(solicitudes['NUMERO'], errors='coerce')
+solicitudes = solicitudes[solicitudes['NUMERO'].notna()]
+solicitudes['NUMERO'] = solicitudes['NUMERO'].astype(int)
+
+solicitudes_unicas = solicitudes.drop_duplicates(subset='NUMERO')
+i_financiera_unicas = i_financiera.drop_duplicates(subset='NUM_SOL')
+
+i_financiera_final = i_financiera_unicas.merge(solicitudes_unicas, how='left', left_on='NUM_SOL', right_on='NUMERO')
+
+i_financiera_final['FCHSOL'] = pd.to_datetime(i_financiera_final['FCHSOL'], format='%d/%m/%y')
+max_solcc = pd.pivot_table(i_financiera_final, 'FCHSOL', ['CEDULA_x','NUM_SOL'], aggfunc=np.max)
+max_solcc = max_solcc.reset_index(level=['CEDULA_x','NUM_SOL'])
+max_solcc = max_solcc[max_solcc.groupby(['CEDULA_x'])['FCHSOL'].transform(max) == max_solcc['FCHSOL']]
+i_financier_final2 = i_financiera_final[i_financiera_final['NUM_SOL'].isin(max_solcc['NUM_SOL'])]
+
+i_financier_final2['SAL_BASE'].hist()
+plt.title('SAL_BASE')
+i_financier_final2['TOTALINGRE'].hist()
+plt.title('TOTALINGRE')
+i_financier_final2['TOTALEGRE'].hist()
+plt.title('TOTALEGRE')
+i_financier_final2['CAPACIDA'].hist()
+plt.title('CAPACIDA')
+i_financier_final2['PASIVOS'].hist()
+plt.title('PASIVOS')
+i_financier_final2['OTR_PASIVO'].hist()
+plt.title('OTR_PASIVO')
+i_financier_final2['TOTAL_DESCUENTOS'].hist()
+plt.title('TOTAL_DESCUENTOS')
+
+i_financier_final2['SAL_BASE'] = i_financier_final2['SAL_BASE'].clip(upper=i_financier_final2['SAL_BASE'].quantile(0.95))
+i_financier_final2['TOTALINGRE'] = i_financier_final2['TOTALINGRE'].clip(upper=i_financier_final2['TOTALINGRE'].quantile(0.95))
+i_financier_final2['TOTALEGRE'] = i_financier_final2['TOTALEGRE'].clip(upper=i_financier_final2['TOTALEGRE'].quantile(0.95))
+i_financier_final2['CAPACIDA'] = i_financier_final2['CAPACIDA'].clip(lower=i_financier_final2['CAPACIDA'].quantile(0.05), upper=i_financier_final2['CAPACIDA'].quantile(0.95))
+i_financier_final2['PASIVOS'] = i_financier_final2['PASIVOS'].clip(upper=i_financier_final2['PASIVOS'].quantile(0.95))
+i_financier_final2['OTR_PASIVO'] = i_financier_final2['OTR_PASIVO'].clip(upper=i_financier_final2['OTR_PASIVO'].quantile(0.95))
+i_financier_final2['TOTAL_DESCUENTOS'] = i_financier_final2['TOTAL_DESCUENTOS'].clip(upper=i_financier_final2['TOTAL_DESCUENTOS'].quantile(0.95))
+
+i_financier_final2.boxplot(column=['SAL_BASE'])
+i_financier_final2.boxplot(column=['TOTALINGRE'])
+i_financier_final2.boxplot(column=['TOTALEGRE'])
+i_financier_final2.boxplot(column=['CAPACIDA'])
+i_financier_final2.boxplot(column=['PASIVOS'])
+i_financier_final2.boxplot(column=['OTR_PASIVO'])
+i_financier_final2.boxplot(column=['TOTAL_DESCUENTOS'])
+
+#Uniendo la tabla de información financiera con personas
+personas = personas.merge(i_financier_final2, how='left', left_on='CEDULA', right_on='CEDULA_x')
+
+#Eliminación de columnas duplicadas
+personas = personas.drop(['ACTIVIDDAD_y', 'AFILIACION_y', 'ANTIG_VIVIEN_y', 'APELLIDO1_y', 'APELLIDO2_y', 'APROBO', 'ASES_EXT', 'BASE', 'CAPA_NETA', 'CAPA_TABLA', 'CEDULA_CAP', 'CEDULA_CO', 'CEDULA_CON_x', 'CEDULA_CON_y', 'CEDULA_DS', 'CEDULA_ES', 'CEDULA_y', 'CELULAR_1', 'CELULAR_x', 'CELULAR_y', 'CIUDAD_y', 'CIUDADEXP_y', 'CIUDADNAC_y', 'CLAVE_PENSION', 'CLTAPELL1', 'CLTAPELL2', 'CLTBARRES', 'CLTCELULA', 'CLTCIUCED', 'CLTCIURES', 'CLTDIRRES', 'CLTEMAIL', 'CLTNOMBR1', 'CLTNOMBR2', 'CLTNUMCED', 'CLTTELEFO', 'CNYAPELL1', 'CNYAPELL2', 'CNYBARRES', 'CNYCELULA', 'CNYCIUCED', 'CNYCIURES', 'CNYDIRRES', 'CNYEMAIL', 'CNYNOMBR1', 'CNYNOMBR2', 'CNYNUMCED', 'CNYTELEFO', 'COD_ALUMNO', 'COD_BARRIO_y', 'COD_BASE', 'COD_BASE_x', 'COD_BASE_y', 'COD_CONTRA', 'COD_EMPRE', 'COD_ESTCIV_y', 'COD_FC', 'COD_MARCA', 'COD_MATRICULA', 'COD_MATRICULADS', 'COD_MILITA_x', 'COD_MILITA_y', 'COD_NIVEDU_1', 'COD_NIVEDU_y', 'COD_PROFE_1', 'COD_PROFE_y', 'COD_UNIVCIU', 'COD_UNIVERS', 'COD_VIVIEN_1', 'COD_VIVIEN_y', 'CODE_BARRI_y', 'CODPOSTAL_x', 'CODPOSTAL_y', 'COMISION_x', 'COMISION_y', 'COMOSUPO', 'DESTINO', 'DIRECCION_1', 'DIRECCION_x', 'DIRECCION_y', 'DIRECCION2_x', 'DIRECCION2_y', 'EMAILPERS_x', 'EMAILPERS_y', 'ENVIOCORRE_x', 'ENVIOCORRE_y', 'ESTATURA_x', 'ESTATURA_y', 'ESTRACTO', 'ESTRATO_y', 'FACTA_A', 'FACTA_B', 'FACTA_C', 'FACTA_D', 'FACTA_E', 'FEC_SCORELOG', 'FECHA', 'FECHA_CIMG', 'FECHA_CREA_y', 'FECHAEXP_1', 'FECHAEXP_y', 'FECHANAC_y', 'FORMULA', 'GRADPODPUB', 'IMAGEN_PRO', 'IMAGEN_PRO2', 'IMAGEN_PRO3', 'IMAGEN_PRO4', 'IMAGEN_SEG', 'INGRESOSCN_y', 'LATITUD_x', 'LATITUD_y', 'LONGITUD_x', 'LONGITUD_y', 'MANRECPUB', 'MANRECPUB_DESC', 'MARGENSEG', 'MEXT_BANCO', 'MEXT_CIUD', 'MEXT_CUENT', 'MEXT_MONED', 'MEXT_PAIS', 'MODELO_VEH', 'MONEDAEXTR', 'MONSALDES', 'NEGC_UBIC', 'NEGC_VENT', 'NEGCMONTO', 'NEGOC_ACT', 'NEGOC_ANT', 'NEGOC_BAR', 'NEGOC_CIU', 'NEGOC_DIR', 'NEGOC_NIT', 'NEGOC_NOM', 'NEGOC_TEL', 'NEGOC_TIP', 'NOMBRE1_x', 'NOMBRE1_y', 'NOMBRE2_x', 'NOMBRE2_y', 'NROTAXIS', 'NUEVO', 'NUM_CUO', 'NUM_EMPLE', 'NUM_SOL', 'NUMFIC', 'NUMID_y', 'OBSERVACION1', 'OBSERVACION2', 'OCUPACIOCN_y', 'OPI_DESC', 'OPI_TIPO', 'OPI_VLRMES', 'OPINTERNAL', 'OTROS_BENEFICIOS_y', 'OTROS_INGP_y', 'PARENTESCO_x', 'PARENTESCO_y', 'PERS_CARGO_1', 'PERS_CARGO_y', 'PESO_y', 'PROM_NOTAS', 'PUESTOICFES', 'RECONOPUB', 'REFERENCIA_SP', 'SECCIONAL_x', 'SECCIONAL_y', 'SEDE_DIG', 'SEXO_1', 'SEXO_y', 'SINCRO_1', 'SINCRO_x', 'SINCRO_y', 'TELEFONO_1', 'TELEFONO_x', 'TELEFONO_y', 'TIELOCAL', 'TIEMPO_x', 'TIEMPO_y', 'TIP_TELF_x', 'TIP_TELF_y', 'TIPINSTBAS', 'TIPO_DOC_y', 'TIPO_LIQ', 'TIPO_LUGAR', 'TPCREDGARA', 'TURNO', 'TURNO_PROP', 'UNIV_ANOPER', 'UNIVJORNADA', 'Unnamed: 200', 'Unnamed: 201', 'Unnamed: 47', 'Unnamed: 49', 'Unnamed: 50', 'USUARIO', 'USUARIO_DIG', 'VL_ADICIONAL1', 'VLR_ARRIENDO', 'VLR_CREDIT', 'VLR_FONDOG', 'VLR_MAXAPAGAR', 'VLR_OBSEQ', 'VLR_VEHICULO', 'VLRPREPA', 'VLRPROXCA_x', 'VLRPROXCA_y','TIPO_DOC_x',], 1)
+personas = personas.rename(columns={ 'APELLIDO1_x':  'APELLIDO1', 'APELLIDO2_x':  'APELLIDO2', 'CIUDADEXP_x':  'CIUDADEXP', 'FECHAEXP_x':  'FECHAEXP', 'CIUDADNAC_x':  'CIUDADNAC', 'FECHANAC_x':  'FECHANAC', 'COD_ESTCIV_x':  'COD_ESTCIV', 'SEXO_x':  'SEXO', 'COD_NIVEDU_x':  'COD_NIVEDU', 'COD_PROFE_x':  'COD_PROFE', 'PERS_CARGO_x':  'PERS_CARGO', 'CIUDAD_x':  'CIUDAD', 'COD_BARRIO_x':  'COD_BARRIO', 'COD_VIVIEN_x':  'COD_VIVIEN', 'AFILIACION_x':  'AFILIACION', 'ACTIVIDDAD_x':  'ACTIVIDDAD', 'CODE_BARRI_x':  'CODE_BARRI', 'INGRESOSCN_x':  'INGRESOSCN', 'OCUPACIOCN_x':  'OCUPACIOCN', 'ESTRATO_x':  'ESTRATO', 'ANTIG_VIVIEN_x':  'ANTIG_VIVIEN', 'NUMID_x':  'NUMID', 'FECHA_CREA_x':  'FECHA_CREA', 'PESO_x':  'PESO', 'OTROS_INGP_x':  'OTROS_INGP', 'OTROS_BENEFICIOS_x':  'OTROS_BENEFICIOS',})
+
+#%%Lectura y limpieza de creditos
+
+#Eliminación de céditos posteriores a 31/08/2021
+creditos['F_PAGADO'] = pd.to_datetime(creditos['F_PAGADO'], format='%d/%m/%y')
+creditos['FECHA_AP'] = pd.to_datetime(creditos['FECHA_AP'], format='%d/%m/%y')
+creditos = creditos[creditos['FECHA_AP'] <= pd.to_datetime('31/08/2021', format='%d/%m/%Y')]
+
+#Por usuario hacer también la desviación estandar, calcular la mediana de la población para determinaar si está por arriba o por debajo
+creditos_sum = pd.DataFrame()
+creditos_sum['NUM_CREDITOS'] = creditos.groupby(['CEDULA_CLI']).size()
+creditos_sum['CREDITO_PROMEDIO_PORCC'] = creditos.groupby('CEDULA_CLI')['VALOR_TOTA'].mean()
+creditos_sum['CREDITO_MAX'] = creditos.groupby('CEDULA_CLI')['VALOR_TOTA'].max()
+creditos_sum['CREDITO_STD'] = creditos['VALOR_TOTA'].std()
+creditos_sum['CREDITO_PROMEDIO'] = creditos['VALOR_TOTA'].mean()
+creditos_sum['CREDITO_DIF_AVG'] = creditos_sum['CREDITO_PROMEDIO_PORCC'] - creditos_sum['CREDITO_PROMEDIO']
+creditos_sum['CREDITO_MEDIANA'] = statistics.median(creditos['VALOR_TOTA'])
+creditos_sum['CREDITO_MARCAMEDIANA'] =np.where(creditos_sum['CREDITO_PROMEDIO_PORCC'] > creditos_sum['CREDITO_MEDIANA'], 1, 0)
+creditos_sum['PLAZO_PROMEDIO_PORCC'] = creditos.groupby('CEDULA_CLI')['NUMERO_CUO'].mean()
+creditos_sum['PLAZO_MAX'] = creditos.groupby('CEDULA_CLI')['NUMERO_CUO'].max()
+creditos_sum['PLAZO_STD'] = creditos['NUMERO_CUO'].std()
+creditos_sum['PLAZO_PROMEDIO'] = creditos['NUMERO_CUO'].mean()
+creditos_sum['PLAZO_DIF_AVG'] = creditos_sum['PLAZO_PROMEDIO_PORCC'] - creditos_sum['PLAZO_PROMEDIO']
+creditos_sum['PLAZO_MEDIANA'] = statistics.median(creditos['NUMERO_CUO'])
+creditos_sum['PLAZO_MARCAMEDIANA'] =np.where(creditos_sum['PLAZO_PROMEDIO_PORCC'] > creditos_sum['PLAZO_MEDIANA'], 1, 0)
+creditos_sum['CUOTA_MAX'] = creditos.groupby('CEDULA_CLI')['VALOR_CUO'].max()
+creditos_sum['CUOTA_PROMEDIO_PORCC'] = creditos.groupby('CEDULA_CLI')['VALOR_CUO'].mean()
+creditos_sum['CUOTA_MAX'] = creditos.groupby('CEDULA_CLI')['VALOR_CUO'].max()
+creditos_sum['CUOTA_STD'] = creditos['VALOR_CUO'].std()
+creditos_sum['CUOTA_PROMEDIO'] = creditos['VALOR_CUO'].mean()
+creditos_sum['CUOTA_DIF_AVG'] = creditos_sum['CUOTA_PROMEDIO_PORCC'] - creditos_sum['CUOTA_PROMEDIO']
+creditos_sum['CUOTA_MEDIANA'] = statistics.median(creditos['VALOR_CUO'])
+creditos_sum['CUOTA_MARCAMEDIANA'] =np.where(creditos_sum['CUOTA_PROMEDIO_PORCC'] > creditos_sum['CUOTA_MEDIANA'], 1, 0)
+creditos['PLAZO_PAGO'] = np.where(creditos['F_PAGADO'].isnull(), np.nan, ((creditos['F_PAGADO']-creditos['FECHA_AP']).dt.days/30))
+creditos['PLAZO_PAGO2'] = np.where(creditos['F_PAGADO'].isnull(), 0,1)
+creditos_sum['PLAZO_PAGO2'] = creditos.groupby('CEDULA_CLI')['PLAZO_PAGO2'].max()
+creditos_sum['PLAZO_PAGO_PROMEDIO_PORCC'] = creditos.groupby('CEDULA_CLI')['PLAZO_PAGO'].mean()
+creditos_sum['PLAZO_PAGO_MAX'] = creditos.groupby('CEDULA_CLI')['PLAZO_PAGO'].max()
+creditos_sum['PLAZO_PAGO_STD'] = creditos['PLAZO_PAGO'].std()
+creditos_sum['PLAZO_PAGO_PROMEDIO'] = creditos['PLAZO_PAGO'].mean()
+creditos_sum['PLAZO_PAGO_DIF_AVG'] = np.where(creditos_sum['PLAZO_PAGO_PROMEDIO_PORCC'].isnull(), np.nan, (creditos_sum['PLAZO_PAGO_PROMEDIO_PORCC'] - creditos_sum['PLAZO_PAGO_PROMEDIO']))
+creditos_sum['PLAZO_PAGO_MEDIANA'] = statistics.median(creditos['PLAZO_PAGO'])
+
+score = pd.pivot_table(creditos, 'FECHA_AP', ['CEDULA_CLI','SCOREM'], aggfunc=np.max)
+score = score.reset_index(level=['CEDULA_CLI','SCOREM'])
+score = score.drop('FECHA_AP', axis=1)
+score['SCOREM'].value_counts()
+
+creditos_sum = creditos_sum.merge(score, how='left', on='CEDULA_CLI')
+creditos_sum.reset_index(level=0, inplace=True)
+creditos_sum['CEDULA_CLI'] = pd.to_numeric(creditos_sum['CEDULA_CLI'], errors='coerce')
+
+creditos_sum['NUM_CREDITOS'].hist()
+plt.title('NUM_CREDITOS')
+creditos_sum['CREDITO_PROMEDIO_PORCC'].hist()
+plt.title('CREDITO_PROMEDIO_PORCC')
+creditos_sum['CREDITO_MAX'].hist()
+plt.title('CREDITO_MAX')
+creditos_sum['CREDITO_DIF_AVG'].hist()
+plt.title('CREDITO_DIF_AVG')
+creditos_sum['PLAZO_PROMEDIO_PORCC'].hist()
+plt.title('PLAZO_PROMEDIO_PORCC')
+creditos_sum['PLAZO_MAX'].hist()
+plt.title('PLAZO_MAX')
+creditos_sum['PLAZO_DIF_AVG'].hist()
+plt.title('PLAZO_DIF_AVG')
+creditos_sum['CUOTA_MAX'].hist()
+plt.title('CUOTA_MAX')
+creditos_sum['CUOTA_PROMEDIO_PORCC'].hist()
+plt.title('CUOTA_PROMEDIO_PORCC')
+creditos_sum['SCOREM'].hist()
+plt.title('SCOREM')
+
+creditos_sum['NUM_CREDITOS'] = creditos_sum['NUM_CREDITOS'].clip(upper=creditos_sum['NUM_CREDITOS'].quantile(0.95))
+creditos_sum['CREDITO_PROMEDIO_PORCC'] = creditos_sum['CREDITO_PROMEDIO_PORCC'].clip(upper=creditos_sum['CREDITO_PROMEDIO_PORCC'].quantile(0.95))
+creditos_sum['CREDITO_MAX'] = creditos_sum['CREDITO_MAX'].clip(upper=creditos_sum['CREDITO_MAX'].quantile(0.95))
+creditos_sum['CREDITO_DIF_AVG'] = creditos_sum['CREDITO_DIF_AVG'].clip(upper=creditos_sum['CREDITO_DIF_AVG'].quantile(0.95))
+creditos_sum['PLAZO_PROMEDIO_PORCC'] = creditos_sum['PLAZO_PROMEDIO_PORCC'].clip(lower=creditos_sum['PLAZO_PROMEDIO_PORCC'].quantile(0.05), upper=creditos_sum['PLAZO_PROMEDIO_PORCC'].quantile(0.95))
+creditos_sum['PLAZO_MAX'] = creditos_sum['PLAZO_MAX'].clip(lower=creditos_sum['PLAZO_MAX'].quantile(0.05), upper=creditos_sum['PLAZO_MAX'].quantile(0.95))
+creditos_sum['PLAZO_DIF_AVG'] = creditos_sum['PLAZO_DIF_AVG'].clip(lower=creditos_sum['PLAZO_DIF_AVG'].quantile(0.05), upper=creditos_sum['PLAZO_DIF_AVG'].quantile(0.95))
+creditos_sum['CUOTA_MAX'] = creditos_sum['CUOTA_MAX'].clip(upper=creditos_sum['CUOTA_MAX'].quantile(0.95))
+creditos_sum['CUOTA_PROMEDIO_PORCC'] = creditos_sum['CUOTA_PROMEDIO_PORCC'].clip(upper=creditos_sum['CUOTA_PROMEDIO_PORCC'].quantile(0.95))
+
+creditos_sum.boxplot(column=['NUM_CREDITOS'])
+creditos_sum.boxplot(column=['CREDITO_PROMEDIO_PORCC'])
+creditos_sum.boxplot(column=['CREDITO_MAX'])
+creditos_sum.boxplot(column=['CREDITO_DIF_AVG'])
+creditos_sum.boxplot(column=['PLAZO_PROMEDIO_PORCC'])
+creditos_sum.boxplot(column=['PLAZO_MAX'])
+creditos_sum.boxplot(column=['PLAZO_DIF_AVG'])
+creditos_sum.boxplot(column=['CUOTA_MAX'])
+creditos_sum.boxplot(column=['CUOTA_PROMEDIO_PORCC'])
+
+personas = personas.merge(creditos_sum, how='left', left_on='CEDULA', right_on='CEDULA_CLI')
+#%%Creación de la edad de la persona
+
+personas['F_CORTE'] = "31/08/2021"
+personas['F_CORTE'] = pd.to_datetime(personas['F_CORTE'], format='%d/%m/%Y')
+
+#Eliminación de solicitudes posteriores al 31/08/2021
+personas = personas[personas['FCHSOL']<= personas['F_CORTE']]
+
+#Eliminación de los clientes sin crédito
+personas = personas.dropna(subset=['CEDULA_CLI'])
+personas['EDAD'] = ((personas['F_CORTE']-personas['FECHANAC']).dt.days/360)
+
+#%%Marca clientes malos
+
+#Marcación de créditos de clientes mayores a 75 años con duración de más de 24 meses
+
+clientes_malos1 = personas[['CEDULA']][personas['EDAD'] > 75]
+clientes_malos1['CAUSAL'] = 'Edad'
+
+#Clientes cobrados a la aseguradora y a la fianza
+pd.DataFrame(estado_creditos.groupby(['ESTADO']).size())
+clientes_malos2 = creditos[['CREDITO']][estado_creditos['ESTADO'] == 'Insurance paid']
+clientes_malos2['CAUSAL'] = 'Seguro'
+
+clientes_malos3 = creditos[['CREDITO']][estado_creditos['ESTADO'] == 'Collateral paid']
+clientes_malos3['CAUSAL'] = 'Fianza'
+
+clientes_malos23 = pd.concat([clientes_malos2, clientes_malos3])
+clientes_malos23['CREDITO'] = pd.to_numeric(clientes_malos23['CREDITO'], errors='coerce')
+clientes_malos23 = clientes_malos23.merge(creditos['CEDULA_CLI'], how='left', left_on=clientes_malos23['CREDITO'], right_on=creditos['CREDITO'])
+clientes_malos23 = clientes_malos23[['CEDULA_CLI','CAUSAL']]
+clientes_malos23 = clientes_malos23.rename(columns={ 'CEDULA_CLI':  'CEDULA'})
+
+clientes_malos4 = pd.DataFrame()
+clientes_malos4['CEDULA'] = creditos['CEDULA_CLI'][creditos['INT_NORMAL']< 0.016]
+clientes_malos4['CAUSAL'] = "Tasa"
+
+clientes_malos5 = pd.DataFrame()
+clientes_malos5['CEDULA'] = reestructurados['CEDULA']
+clientes_malos5['CAUSAL'] = "Reestructurados"
+
+clientes_malos6 = pd.DataFrame()
+clientes_malos6 = v_credifinanciera.merge(creditos['CEDULA_CLI'], how='left', left_on=v_credifinanciera['CREDITO'], right_on=creditos['CREDITO'])
+clientes_malos6['CAUSAL'] = 'Credifinanciera'
+clientes_malos6 = clientes_malos6[['CEDULA_CLI','CAUSAL']]
+clientes_malos6 = clientes_malos6.rename(columns={ 'CEDULA_CLI':  'CEDULA'})
+
+clientes_malos = pd.concat([clientes_malos1, clientes_malos23 ,clientes_malos4, clientes_malos5, clientes_malos6])
+
+clientes_malos = clientes_malos.merge(creditos['CREDITO'], how='left', left_on=clientes_malos['CEDULA'], right_on=creditos['CEDULA_CLI'])
+clientes_malos = clientes_malos.dropna(subset=['CREDITO'])
+clientes_malos = clientes_malos.drop_duplicates(subset = 'CEDULA')
+clientes_malos = clientes_malos[['CEDULA', 'CAUSAL']]
+
+clientes_buenos1 = creditos[['CREDITO']][estado_creditos['ESTADO'] == 'Refinanced']
+clientes_buenos1['CREDITO'] = pd.to_numeric(clientes_buenos1['CREDITO'], errors='coerce')
+clientes_buenos1 = clientes_buenos1.merge(creditos['CEDULA_CLI'], how='left', left_on=clientes_buenos1['CREDITO'], right_on=creditos['CREDITO'])
+clientes_buenos1 = clientes_buenos1[['CEDULA_CLI']]
+clientes_buenos1 = clientes_buenos1.rename(columns={ 'CEDULA_CLI':  'CEDULA'})
+clientes_buenos1 = clientes_buenos1.drop_duplicates(subset = 'CEDULA')
+
+clientes_buenos2 = clientes_malos1[['CEDULA']]
+clientes_buenos2 = clientes_buenos2.merge(creditos_sum['PLAZO_PAGO_PROMEDIO_PORCC'], how='left', left_on=clientes_buenos2['CEDULA'], right_on=creditos_sum['CEDULA_CLI'])
+clientes_buenos2 = clientes_buenos2[clientes_buenos2['PLAZO_PAGO_PROMEDIO_PORCC'] <= 36]
+clientes_buenos2 = clientes_buenos2[['CEDULA']]
+
+clientes_buenos = pd.concat([clientes_buenos1, clientes_buenos2])
+clientes_buenos = clientes_buenos.drop_duplicates(subset = 'CEDULA')
+
+clientes_malos = clientes_malos[~clientes_malos['CEDULA'].isin(clientes_buenos['CEDULA'])]
+clientes_malos['MARCA_MALO'] = 1
+
+personas = personas.merge(clientes_malos['MARCA_MALO'], how='left', left_on=personas['CEDULA'], right_on=clientes_malos['CEDULA'])
+personas['MARCA_MALO'] = personas['MARCA_MALO'].fillna(0)
+
+personas['MARCA_MALO'].describe()
+
+#%%Creación del plazo desde la expdición de la cédula
+
+pd.to_datetime('31/08/2021', format='%d/%m/%Y')
+
+personas['FECHAEXP'] = pd.to_datetime(personas['FECHAEXP'], format='%d/%m/%Y')
+personas['ANOS_EXPEDICION'] = ((pd.to_datetime('31/08/2021', format='%d/%m/%Y')-personas['FECHAEXP']).dt.days/360)
+
+cedulas = personas['CEDULA']
+personas = personas.set_index('CEDULA')
+personas.to_excel('personas_py.xlsx')
+
+#%%Definición final de variables
+
+personas_final = personas[['CIUDADEXP', 'CIUDADNAC', 'COD_ESTCIV', 'COD_NIVEDU', 'COD_PROFE', 'PERS_CARGO', 'CIUDAD', 'ESTRATO',
+                           'CODOFIC', 'ESTADCIVI', 'ASESOR', 'SALDO_VIGENTE', 'SALDO_MORA', 'OBL_ACTIVAS', 'SALDO_LBZ', 'SAL_BASE',
+                           'TOTALINGRE', 'TOTALEGRE', 'TOTAL_DESCUENTOS', 'NUM_CREDITOS', 'CREDITO_PROMEDIO_PORCC', 'CREDITO_MAX',
+                           'CREDITO_DIF_AVG', 'PLAZO_PROMEDIO_PORCC', 'PLAZO_MAX', 'PLAZO_DIF_AVG', 'CUOTA_MAX', 'CUOTA_PROMEDIO_PORCC',
+                           'PLAZO_PAGO2', 'CREDITO_MARCAMEDIANA', 'PLAZO_MARCAMEDIANA', 'CUOTA_MARCAMEDIANA', 'CAPACIDA', 'SCOREM',
+                           'EDAD', 'ANOS_EXPEDICION', 'SEXO', 'MARCA_MALO']]
+
+personas_final.reset_index(level=0, inplace=True)
+personas_final = personas_final.drop_duplicates(subset='CEDULA')
+
+nan_count = personas_final.isna().sum(axis=0)
+
+#%%Selección de variables continuas y categoricas
+
+personas_continuas = personas[['PERS_CARGO', 'SALDO_VIGENTE', 'SALDO_MORA', 'OBL_ACTIVAS', 'SALDO_LBZ', 'SAL_BASE', 'TOTALINGRE',
+                               'TOTALEGRE', 'TOTAL_DESCUENTOS', 'NUM_CREDITOS', 'CREDITO_PROMEDIO_PORCC', 'CREDITO_MAX',
+                               'CREDITO_DIF_AVG', 'PLAZO_PROMEDIO_PORCC', 'PLAZO_MAX', 'PLAZO_DIF_AVG', 'CUOTA_MAX',
+                               'CUOTA_PROMEDIO_PORCC', 'CAPACIDA', 'SCOREM', 'EDAD', 'ANOS_EXPEDICION']]
+
+corr = personas_continuas.corr()
+
+personas_categoricas = personas[['CIUDADEXP', 'CIUDADNAC', 'COD_ESTCIV', 'COD_NIVEDU', 'COD_PROFE', 'CIUDAD', 'ESTRATO', 'CODOFIC', 
+                                 'ESTADCIVI', 'ASESOR', 'PLAZO_PAGO2', 'CREDITO_MARCAMEDIANA', 'PLAZO_MARCAMEDIANA', 
+                                 'CUOTA_MARCAMEDIANA']]
+
+personas_categoricas['ESTRATO'].value_counts()
+personas_categoricas = personas_categoricas[(personas_categoricas['ESTRATO'] <= 6)]
+personas_categoricas = personas_categoricas[(personas_categoricas['ESTRATO'] > 0)]
+
+personas_categoricas['LARGO1'] = personas_categoricas['CIUDADNAC'].astype(str).str.len()
+personas_categoricas['LARGO1'].value_counts()
+personas_categoricas = personas_categoricas[personas_categoricas['LARGO1'] >= 6]
+personas_categoricas = personas_categoricas[personas_categoricas['LARGO1'] <= 7]
+
+personas_categoricas['LARGO2'] = personas_categoricas['CIUDAD'].astype(str).str.len()
+personas_categoricas['LARGO2'].value_counts()
+personas_categoricas = personas_categoricas[personas_categoricas['LARGO2'] >= 6]
+personas_categoricas = personas_categoricas[personas_categoricas['LARGO2'] <= 7]
+
+personas_categoricas['LARGO3'] = personas_categoricas['CIUDADEXP'].astype(str).str.len()
+personas_categoricas['LARGO3'].value_counts()
+personas_categoricas = personas_categoricas[personas_categoricas['LARGO3'] >= 6]
+personas_categoricas = personas_categoricas[personas_categoricas['LARGO3'] <= 7]
+
+personas_categoricas = personas_categoricas.drop(['LARGO1','LARGO2', 'LARGO3'], axis=1)
+
+personas_categoricas.reset_index(level=0, inplace=True)
+personas_categoricas = personas_categoricas.drop_duplicates(subset='CEDULA')
+personas_categoricas = personas_categoricas.set_index('CEDULA')
+
+ax = sns.heatmap(
+    corr, 
+    vmin=-1, vmax=1, center=0,
+    cmap=sns.diverging_palette(20, 220, n=200),
+    square=True)
+
+ax.set_xticklabels(
+    ax.get_xticklabels(),
+    rotation=45,
+    horizontalalignment='right')
+
+#%%Distancia de Gower y normalización
+
+personas_categoricas_gower = np.array(personas_categoricas)
+personas_categoricas_gower = pd.DataFrame(gower.gower_matrix(personas_categoricas, cat_features=[True, True, True,True, True, True, True, 
+                                                                                                 True, True, True,True, True, True, True]))
+
+cedulas_cat = pd.DataFrame()
+cedulas_cat['CEDULA'] = personas_categoricas.index
+
+cedulas_cont = personas_continuas.index
+cedulas_cont = cedulas_cont.drop_duplicates()
+
+personas_continuas.reset_index(level=0, inplace=True)
+personas_continuas = personas_continuas.drop_duplicates(subset='CEDULA')
+personas_continuas = personas_continuas.set_index('CEDULA')
+
+personas_continuas['TOTAL_DESCUENTOS'] = personas_continuas['TOTAL_DESCUENTOS'].fillna(0)
+personas_continuas = personas_continuas.drop(columns=['TOTALINGRE', 'ANOS_EXPEDICION'])
+
+personas_categoricas_gower[0].value_counts()
+
+personas_categoricas_gower = pd.concat([personas_categoricas_gower, cedulas_cat], axis=1)
+personas_categoricas_gower = personas_categoricas_gower.set_index('CEDULA')
+
+personas_tratadas = personas_categoricas_gower.merge(personas_continuas, how='left', left_index=True, right_index=True)
+
+personas_normalizada = pd.DataFrame(StandardScaler().fit_transform(np.array(personas_tratadas)))
+
+personas_tratadas = personas_tratadas.dropna()
+personas_normalizada = personas_normalizada.dropna()
+
+
+dummies = pd.get_dummies(personas_categoricas.astype(str))
+personas_continuas_norm = pd.DataFrame(StandardScaler().fit_transform(np.array(personas_continuas)))
+personas_continuas_cc = pd.DataFrame()
+personas_continuas_cc['CEDULA'] = personas_continuas.index
+personas_continuas_norm = pd.concat([personas_continuas_norm, personas_continuas_cc], axis=1)
+personas_continuas_norm = personas_continuas_norm.set_index('CEDULA')
+personas_pca = pd.merge(personas_continuas_norm, dummies, how='right', left_index=True, right_index=True)
+personas_pca = personas_pca.dropna()
+
+#%%Descomposición PCA
+
+from sklearn.decomposition import PCA
+pca = PCA(.95)
+pca.fit(personas_pca)
+personas_pca_final = pca.transform(personas_pca)
+
+#%%Modelos
+
+distortion1 = []
+distortion2 = []
+distortion3 = []
+
+k = range(1,7)
+for i in k:
+    model1 = KMeans(n_clusters=i)
+    model1.fit(personas_normalizada)
+    model2 = KMeans(n_clusters=i)
+    model2.fit(personas_tratadas)
+    model3 = KMeans(n_clusters=i)
+    model3.fit(personas_pca_final)    
+    distortion1.append(model1.inertia_)
+    distortion2.append(model2.inertia_)
+    distortion3.append(model3.inertia_)
+
+#%%Elbow analysis
+
+plt.figure(figsize=(16,8))
+plt.plot(k, distortion1, 'bx-')
+plt.xlabel('k')
+plt.ylabel('Distortion')
+plt.title('Elbow analysis con datos normalizados')
+plt.show()
+
+plt.figure(figsize=(16,8))
+plt.plot(k, distortion2, 'bx-')
+plt.xlabel('k')
+plt.ylabel('Distortion')
+plt.title('Elbow analysis con datos sin normalizar')
+plt.show()
+
+plt.figure(figsize=(16,8))
+plt.plot(k, distortion3, 'bx-')
+plt.xlabel('k')
+plt.ylabel('Distortion')
+plt.title('Elbow analysis con datos PCA')
+plt.show()
+
+#%%Solhouette scores
+
+model1_3= KMeans(n_clusters=3)
+model_labels1_3 = model1_3.fit_predict(personas_normalizada)
+S_score1_3 = silhouette_score(personas_normalizada, model_labels1_3)
+
+model1_4 = KMeans(n_clusters=4)
+model_labels1_4 = model1_4.fit_predict(personas_normalizada)
+S_score1_4 = silhouette_score(personas_normalizada, model_labels1_4)
+
+model1_5 = KMeans(n_clusters=5)
+model_labels1_5 = model1_5.fit_predict(personas_normalizada)
+S_score1_5 = silhouette_score(personas_normalizada, model_labels1_5)
+
+model2_3 = KMeans(n_clusters=3)
+model_labels2_3 = model2_3.fit_predict(personas_tratadas)
+S_score2_3 = silhouette_score(personas_tratadas, model_labels2_3)
+
+model2_4 = KMeans(n_clusters=4)
+model_labels2_4 = model2_4.fit_predict(personas_tratadas)
+S_score2_4 = silhouette_score(personas_tratadas, model_labels2_4)
+
+model2_5 = KMeans(n_clusters=5)
+model_labels2_5 = model2_5.fit_predict(personas_tratadas)
+S_score2_5 = silhouette_score(personas_tratadas, model_labels2_5)
+
+model3_4 = KMeans(n_clusters=4)
+model_labels3_4 = model3_4.fit_predict(personas_tratadas)
+S_score3_4 = silhouette_score(personas_pca_final, model_labels3_4)
+
+model3_5 = KMeans(n_clusters=5)
+model_labels3_5 = model3_5.fit_predict(personas_tratadas)
+S_score3_5 = silhouette_score(personas_pca_final, model_labels3_5)
+
+model3_6 = KMeans(n_clusters=6)
+model_labels3_6 = model3_6.fit_predict(personas_tratadas)
+S_score3_6 = silhouette_score(personas_pca_final, model_labels3_6)
+
+#%%
+model_labels1_3_df = pd.DataFrame(model_labels1_3)
+print(model_labels1_3_df.value_counts())
+
+model_labels2_3_df = pd.DataFrame(model_labels2_3)
+print(model_labels2_3_df.value_counts())
+
+model_labels = model_labels2_3_df
+#%%
+
+cedulas_tratadas = pd.DataFrame()
+cedulas_tratadas['CEDULA'] = personas_tratadas.index
+
+personas_final = pd.DataFrame()
+personas_final = cedulas_tratadas
+personas_final = personas_final.set_index('CEDULA') 
+personas_final = personas_final.merge(personas_continuas, how='left', right_index=True, left_index=True)
+personas_final = personas_final.merge(personas_categoricas, how='left', right_index=True, left_index=True)
+
+genero = pd.DataFrame()
+genero['SEXO'] = personas['SEXO']
+genero.reset_index(level=0, inplace=True)
+genero = genero.drop_duplicates(subset='CEDULA')
+genero = genero.set_index('CEDULA')
+personas_final = personas_final.merge(genero, how='left', right_index=True, left_index=True)
+
+cedulas_tratadas = pd.DataFrame(cedulas_tratadas)
+model_labels = pd.DataFrame(model_labels)
+model_labels = pd.concat([model_labels, cedulas_tratadas], axis=1)
+model_labels = model_labels.rename(columns={ 0:  'CLUSTER'})
+model_labels = model_labels.set_index('CEDULA')
+
+personas_final = personas_final.merge(model_labels, how='left', right_index=True, left_index=True)
+
+clientes_malos = clientes_malos.set_index('CEDULA')
+
+personas_final = personas_final.merge(clientes_malos, how='left', right_index=True, left_index=True)
+personas_final['MARCA_MALO'] = personas_final['MARCA_MALO'].fillna(0)
+personas_final['MARCA_MALO'].mean()
+
+personas_final.to_csv('Clusters.csv')
+
+#%%Carcaterización de los clusters
+
+pd.pivot_table(personas_final, 'CUOTAS', 'CLUSTER','SEXO', aggfunc='count')
+pd.pivot_table(personas_final, 'SAL_BASE', 'CLUSTER', aggfunc='mean')
+pd.pivot_table(personas_final, 'EDAD', 'CLUSTER','SEXO', aggfunc='mean')
+
+porciudad.to_excel('porciudad.xlsx')
+
+personas_final['RANGO_EDAD'] = np.where(personas_final['EDAD'] > 75, '>75', '<75')
+
+
+personas_final.to_excel('personas_final.xlsx')
+
+personas_final['CLUSTER'].value_counts()
+
+personas_final['EDAD'][personas_final['CLUSTER']==2].hist()
+personas_final['SAL_BASE'][personas_final['CLUSTER']==2].hist()
+personas_final['SALDO_VIGENTE'][personas_final['CLUSTER']==2].hist()
+personas_final['SALDO_LBZ'][personas_final['CLUSTER']==1].hist()
+
+personas_final['EDAD'][personas_final['CLUSTER']==0].std()
+personas_final['SAL_BASE'][personas_final['CLUSTER']==1].std()
+  
+personas_final['MARCA_MALO'][personas_final['CLUSTER']==0].mean()
+personas_final['EDAD'][personas_final['CLUSTER']==0].mean()
+personas_final['CAUSAL'][personas_final['CLUSTER']==3].value_counts()
+personas_final['RANGO_EDAD'][personas_final['CLUSTER']==2].value_counts()
+
+statistics.median(personas_final['EDAD'][personas_final['CLUSTER']==2])
+
+statistics.median(personas_final['SAL_BASE'][personas_final['CLUSTER']==2])
+statistics.median(personas_final['SALDO_VIGENTE'][personas_final['CLUSTER']==2])
+statistics.median(personas_final['SALDO_LBZ'][personas_final['CLUSTER']==1])
+statistics.median(personas_final['SALDO_MORA'][personas_final['CLUSTER']==2])
+np.percentile(personas_final['SALDO_LBZ'][personas_final['CLUSTER']==2], 80)
+
+
+#%%
+
+from xgboost import XGBClassifier
+from sklearn.preprocessing import LabelEncoder
+
+labelencoder = LabelEncoder()
+label_categoricas = pd.DataFrame()
+label_categoricas['CIUDADNAC'] = labelencoder.fit_transform(personas_categoricas['CIUDADNAC'])
+label_categoricas['COD_ESTCIV'] = labelencoder.fit_transform(personas_categoricas['COD_ESTCIV'])
+label_categoricas['CIUDAD'] = labelencoder.fit_transform(personas_categoricas['CIUDAD'])
+label_categoricas['ESTRATO'] = labelencoder.fit_transform(personas_categoricas['ESTRATO'])
+label_categoricas['CODOFIC'] = labelencoder.fit_transform(personas_categoricas['CODOFIC'])
+label_categoricas['ASESOR'] = labelencoder.fit_transform(personas_categoricas['ASESOR'])
+label_categoricas['PLAZO_PAGO2'] = labelencoder.fit_transform(personas_categoricas['PLAZO_PAGO2'])
+label_categoricas['CREDITO_MARCAMEDIANA'] = labelencoder.fit_transform(personas_categoricas['CREDITO_MARCAMEDIANA'])
+label_categoricas['PLAZO_MARCAMEDIANA'] = labelencoder.fit_transform(personas_categoricas['PLAZO_MARCAMEDIANA'])
+label_categoricas['CUOTA_MARCAMEDIANA'] = labelencoder.fit_transform(personas_categoricas['CUOTA_MARCAMEDIANA'])
+
+label_categoricas = pd.concat([label_categoricas, cedulas_cat], axis=1)
+label_categoricas = label_categoricas[label_categoricas['CEDULA'].isin(cedulas_tratadas['CEDULA'])]
+label_categoricas = label_categoricas.set_index('CEDULA')
+
+personas_continuas_xg = personas_continuas
+personas_continuas_xg.reset_index(level=0, inplace=True)
+personas_continuas_xg = personas_continuas_xg[personas_continuas_xg['CEDULA'].isin(cedulas_tratadas['CEDULA'])]
+personas_continuas_xg = personas_continuas_xg.set_index('CEDULA')
+
+personas_categoricas['PLAZO_PAGO2'].describe()
+
+df_xg = pd.DataFrame()
+df_xg = personas_continuas_xg.merge(label_categoricas, how='left', right_index=True, left_index=True)
+
+df_xg = np.array(df_xg)
+model_labelsxg = np.array(model_labels)
+
+model_xg = XGBClassifier()
+model_xg.fit(df_xg, model_labelsxg)
+
+mf = model_xg.feature_importances_
+mf = pd.DataFrame(mf)
+nom_variables = list(personas_final.columns)
+
+nom_variables= pd.DataFrame(nom_variables)
+nom_variables = nom_variables.iloc[0:33,:]
+
+mf = pd.concat([mf, nom_variables], axis=1)
+mf.to_excel('imp_variables.xlsx')
+
+#%%
+from xgboost import plot_tree
+plot_tree(model_xg, num_trees=3)
